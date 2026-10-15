@@ -1,0 +1,248 @@
+CREATE DATABASE python_ui_project ;
+USE python_ui_project;
+
+SELECT * FROM products;
+SELECT * FROM reorders;
+SELECT * FROM shipments;
+SELECT * FROM stock_entries;
+SELECT * FROM suppliers;
+
+ALTER TABLE products 
+MODIFY product_id  INT PRIMARY KEY AUTO_INCREMENT,
+MODIFY product_name VARCHAR(50),
+MODIFY category VARCHAR(50),
+MODIFY price DECIMAL(12,2),
+MODIFY stock_quantity INT,
+MODIFY reorder_level INT,
+MODIFY supplier_id INT ;
+
+
+ALTER TABLE reorders 
+MODIFY reorder_id  INT PRIMARY KEY AUTO_INCREMENT,
+MODIFY product_id INT,
+MODIFY reorder_quantity INT,
+MODIFY reorder_date DATE,
+MODIFY status varchar(50);
+
+
+ALTER TABLE shipments 
+MODIFY shipment_id  INT PRIMARY KEY AUTO_INCREMENT,
+MODIFY product_id INT,
+MODIFY supplier_id INT,
+MODIFY quantity_received INT,
+MODIFY shipment_date DATE;
+
+ALTER TABLE stock_entries 
+MODIFY entry_id  INT PRIMARY KEY AUTO_INCREMENT,
+MODIFY product_id INT,
+MODIFY change_quantity INT,
+MODIFY change_type VARCHAR(50),
+MODIFY entry_date DATETIME;
+
+ALTER TABLE suppliers 
+MODIFY supplier_id  INT PRIMARY KEY AUTO_INCREMENT,
+MODIFY supplier_name VARCHAR(80),
+MODIFY contact_name VARCHAR(50),
+MODIFY email VARCHAR(100),
+MODIFY phone VARCHAR(13),
+MODIFY address VARCHAR(200);
+
+
+
+ALTER TABLE products      ADD CONSTRAINT fk_products_supplier  FOREIGN KEY (supplier_id) REFERENCES suppliers(supplier_id);
+ALTER TABLE stock_entries ADD CONSTRAINT fk_stock_product      FOREIGN KEY (product_id)  REFERENCES products(product_id);
+ALTER TABLE reorders      ADD CONSTRAINT fk_reorders_product   FOREIGN KEY (product_id)  REFERENCES products(product_id);
+ALTER TABLE shipments     ADD CONSTRAINT fk_shipments_product  FOREIGN KEY (product_id)  REFERENCES products(product_id);
+ALTER TABLE shipments     ADD CONSTRAINT fk_shipments_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(supplier_id);
+
+
+-- 1 total suppliers 
+SELECT COUNT(*) FROM suppliers;
+
+-- 2 Total Products
+SELECT COUNT(*) FROM products;
+
+-- 3. Total categories dealling
+SELECT COUNT(DISTINCT category) FROM products;
+
+-- 4. Total sele value in last 3 months 
+SELECT SUM(ABS(se.change_quantity) * p.price)
+FROM stock_entries AS se
+JOIN products p 
+ON p.product_id = se.product_id
+WHERE se.change_type = 'sale'
+AND 
+se.entry_date >=
+(
+SELECT DATE_SUB(MAX(entry_date),INTERVAL 3 MONTH) FROM stock_entries
+);
+
+-- 5. Total restock value in last 3 months 
+SELECT SUM(ABS(se.change_quantity) * p.price)
+FROM stock_entries AS se
+JOIN products p 
+ON p.product_id = se.product_id
+WHERE se.change_type = 'restock'
+AND 
+se.entry_date >=
+(
+SELECT DATE_SUB(MAX(entry_date),INTERVAL 3 MONTH) FROM stock_entries
+);
+
+-- 6. Bellow Reorder & No Pending Reorders
+
+SELECT COUNT(*) FROM products as p WHERE p.stock_quantity < p.reorder_level
+AND product_id NOT IN 
+(
+SELECT DISTINCT product_id FROM reorders WHERE status = 'pending'
+);
+
+-- 7. suppliers and there contact details
+SELECT supplier_name, contact_name, email, phone FROM suppliers;
+
+-- 8. product with there suppliers and current stock
+SELECT product_name, supplier_name, stock_quantity, reorder_level 
+FROM products as p
+JOIN suppliers s
+ON p.supplier_id = s.supplier_id
+ORDER BY product_name;
+
+
+-- 9. product needing reorder
+SELECT product_id, product_name, stock_quantity, reorder_level FROM products WHERE stock_quantity < reorder_level ;
+
+
+-- 10. Add a new product to the database
+DELIMITER $$ 
+CREATE PROCEDURE add_newproduct_manualID (
+IN p_name VARCHAR(50),
+IN p_category VARCHAR(50),
+IN p_price DECIMAL(10,2),
+IN p_stock INT,
+IN p_reorder INT,
+IN p_supplier INT
+)
+BEGIN 
+DECLARE new_product_id int ;
+DECLARE new_shipment_id int ;
+DECLARE new_entry_id int ;
+
+# mack change in products table
+# generate product id
+SELECT MAX(product_id)+1 INTO new_product_id FROM products ;
+INSERT INTO products(product_id,product_name,category,price,stock_quantity,reorder_level,supplier_id)
+VALUES (new_product_id,p_name,p_category,p_price,p_stock,p_reorder,p_supplier);
+
+
+# mack change in shipments table
+# generate shipment id
+SELECT MAX(shipment_id)+1 INTO new_shipment_id FROM shipments ;
+INSERT INTO shipments(shipment_id,product_id,supplier_id,quantity_received,shipment_date)
+VALUES (new_shipment_id,new_product_id,p_supplier,p_stock,CURDATE());
+
+# mack change in shipments table
+# generate shipment id
+
+SELECT MAX(entry_id)+1 INTO new_entry_id FROM stock_entries ;
+INSERT INTO stock_entries(entry_id,product_id,change_quantity,change_type,entry_date)
+VALUES (new_entry_id,new_product_id,p_stock,"restock",NOW());
+
+END $$
+DELIMITER ;
+
+
+
+-- 11. PRODUCT HISTORY
+CREATE OR REPLACE VIEW product_history AS
+SELECT 
+ph.product_id,
+ph.record_type,
+ph.record_date,
+ph.quantity,
+ph.change_type,
+pr.supplier_id
+FROM (
+SELECT 
+product_id, 
+"shipment" AS record_type,
+shipment_date AS record_date,
+quantity_received AS quantity,
+NULL change_type
+FROM shipments
+
+UNION ALL
+
+SELECT 
+product_id,
+"stock entry" AS record_type,
+entry_date AS record_date,
+change_quantity AS quantity,
+change_type 
+FROM stock_entries)ph
+JOIN products pr ON pr.product_id = ph.product_id ;
+
+
+-- 12 Place Reorder
+
+INSERT INTO reorders(reorder_id, product_id, reorder_quantity, reorder_date, status)
+SELECT MAX(reorder_id)+1, 101, 83, CURDATE(), "ordered" FROM reorders  
+
+
+
+-- 13. 	RECEEIVE REORDER
+
+DELIMITER $$
+CREATE PROCEDURE MarkReorderAsReceived(in in_reorder_id INT)
+BEGIN
+DECLARE pro_id INT ;
+DECLARE qty INT ;
+DECLARE sup_id INT ;
+DECLARE ship_id INT ;
+DECLARE ent_id INT ;
+
+
+START TRANSACTION ; 
+
+-- get product_id , reorder_quantity from reorders
+SELECT product_id, reorder_quantity
+INTO pro_id, qty
+FROM reorders
+WHERE reorder_id = in_reorder_id ;
+
+
+-- get supplier_id from products
+SELECT supplier_id 
+INTO sup_id 
+FROM products
+WHERE product_id = pro_id;
+
+
+# update reorder table -- Received
+UPDATE reorders
+SET status = "received"
+WHERE reorder_id = in_reorder_id;
+
+
+# update stock_quantity in products table 
+UPDATE products
+SET stock_quantity = stock_quantity + qty 
+WHERE product_id = pro_id ;
+
+
+# Insert record into shipments table 
+SELECT MAX(shipment_id)+1 INTO ship_id FROM shipments;
+INSERT INTO shipments(shipment_id, product_id, supplier_id, quantity_received, shipment_date)
+VALUES (ship_id, pro_id, sup_id, qty, CURDATE() );
+ 
+# Insert record into stock_entries table 
+SELECT MAX(entry_id)+1 INTO ent_id FROM stock_entries;
+INSERT INTO stock_entries(entry_id, product_id, change_quantity, change_type, entry_date)
+VALUES(ent_id, pro_id, qty, "restock", NOW());
+
+commit;
+END $$
+DELIMITER ;
+
+
+CALL MarckReorderAsReceive(41)
+
